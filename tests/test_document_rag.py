@@ -37,6 +37,21 @@ def test_windows_path_does_not_call_wslpath_on_native_windows(tmp_path: Path, mo
     assert rag.windows_path(source) == expected
 
 
+def test_rendered_slide_images_deduplicates_windows_case_globs(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(rag.sys, "platform", "win32")
+
+    def fake_glob(self, pattern):
+        if pattern == "*.JPG":
+            return [self / "Slide1.JPG"]
+        if pattern == "*.jpg":
+            return [self / "slide1.jpg"]
+        return []
+
+    monkeypatch.setattr(rag.Path, "glob", fake_glob)
+
+    assert rag.rendered_slide_images(tmp_path) == [tmp_path / "slide1.jpg"]
+
+
 def test_parse_document_date_normalizes_filename_variants():
     assert rag.parse_document_date("ARCYBER Microsoft Unified CSDR APR 2026") == (2026, 4)
     assert rag.parse_document_date("Army CHRA Microsoft Unified CSDR July 2026") == (2026, 7)

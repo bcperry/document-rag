@@ -250,7 +250,18 @@ try {{
         timeout=180,
         check=True,
     )
-    images = list(output_dir.glob("*.JPG")) + list(output_dir.glob("*.jpg"))
+    return rendered_slide_images(output_dir)
+
+
+def rendered_slide_images(output_dir: Path) -> list[Path]:
+    images_by_path = {}
+    for pattern in ("*.JPG", "*.jpg"):
+        for image in output_dir.glob(pattern):
+            resolved_path = str(image.resolve())
+            if sys.platform == "win32":
+                resolved_path = resolved_path.casefold()
+            images_by_path[resolved_path] = image
+    images = list(images_by_path.values())
     return sorted(images, key=lambda image: int(re.search(r"(\d+)$", image.stem).group(1)))
 
 
