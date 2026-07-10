@@ -7,7 +7,7 @@ A focused local semantic-search index for collections of PDF and PowerPoint file
 - Python 3.10+
 - [`uv`](https://docs.astral.sh/uv/)
 - Authenticated GitHub CLI: `gh auth login`
-- Windows PowerPoint when indexing `.pptx` files from WSL
+- Windows PowerPoint for `.pptx` visual rendering, either from native Windows or through WSL interoperability
 
 `gh auth token` authenticates requests to GitHub Models. Text uses `text-embedding-3-small`; slide and page images use the low-tier `openai/gpt-4.1-nano` vision model.
 
@@ -32,6 +32,10 @@ uv run python document_rag.py ingest ./documents --prune
 ```
 
 By default, every PowerPoint slide and PDF page is rendered to a temporary JPEG. Each vision request carries exactly one image, and up to five requests run concurrently. Basic title, intro, divider, agenda, and text-only slides are flagged as not visually useful using both model classification and deterministic PowerPoint structure checks. Their descriptions are stored for inspection but excluded from embeddings; extracted slide text remains searchable. Descriptions for visually useful screenshots, photographs, charts, diagrams, and status layouts are included in embeddings. Adjust concurrency with `--vision-concurrency`, or use `--no-vision` for a text-only run.
+
+PowerPoint rendering works when Python runs directly on Windows and when it runs in WSL with `powershell.exe` and `wslpath` available. Native Windows paths are passed directly to PowerPoint; WSL paths are translated before invoking PowerPoint COM.
+
+`--no-vision` can only index text that `python-pptx` extracts. An image-only deck or slide with no useful extracted text has no content to embed and is reported as skipped with `no searchable text or useful visual description`. Run normal vision-enabled ingestion for screenshots, photographs, and other visual-only content.
 
 GitHub Models free usage is rate limited. One-image requests are more reliable with the small vision model, while concurrency reduces time spent waiting on individual responses.
 

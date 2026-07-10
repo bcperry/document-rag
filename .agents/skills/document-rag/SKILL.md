@@ -34,7 +34,7 @@ Ingestion behavior:
 - Stores descriptions for basic/text-only slides but excludes them from embeddings.
 - Skips unchanged files by content hash.
 
-Use `--no-vision` only when the user explicitly accepts text-only retrieval. Adjust request pressure with `--vision-concurrency <n>`.
+Use `--no-vision` only when the user explicitly accepts text-only retrieval. Image-only slides without extractable text cannot produce embeddings in this mode and are reported as skipped. Adjust request pressure with `--vision-concurrency <n>`.
 
 After ingestion, run:
 
@@ -42,7 +42,7 @@ After ingestion, run:
 uv run python document_rag.py --db .rag/<corpus>.db stats
 ```
 
-Report document count, chunk count, embedding count, skipped files, and errors.
+Report document count, chunk count, embedding count, skipped files and their reasons, and errors. Do not describe an index with zero embeddings as a successful end-to-end retrieval test.
 
 ## Query
 

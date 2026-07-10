@@ -15,6 +15,8 @@ This repository provides a local semantic index for PDF and PowerPoint corpora. 
 - Include useful visual descriptions in retrieval, but exclude basic or text-only visual descriptions from embeddings.
 - Preserve numeric year/month metadata used to sort reporting periods.
 - Do not modify generated databases or virtual-environment files directly.
+- Support PowerPoint rendering on both native Windows and WSL; native Windows must not depend on `wslpath`.
+- Treat a zero-embedding ingest as non-searchable. Report skipped reasons and use vision-enabled ingestion for image-only slides.
 
 ## Common Commands
 

@@ -24,6 +24,19 @@ def test_discover_documents_is_recursive_and_filters_extensions(tmp_path: Path):
     assert documents == [tmp_path / "guide.PDF", nested / "deck.pptx"]
 
 
+def test_windows_path_does_not_call_wslpath_on_native_windows(tmp_path: Path, monkeypatch):
+    source = tmp_path / "Presentation.pptx"
+    expected = str(source.resolve())
+    monkeypatch.setattr(rag.sys, "platform", "win32")
+    monkeypatch.setattr(
+        rag.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("wslpath called")),
+    )
+
+    assert rag.windows_path(source) == expected
+
+
 def test_parse_document_date_normalizes_filename_variants():
     assert rag.parse_document_date("ARCYBER Microsoft Unified CSDR APR 2026") == (2026, 4)
     assert rag.parse_document_date("Army CHRA Microsoft Unified CSDR July 2026") == (2026, 7)
@@ -108,6 +121,39 @@ def test_ingest_indexes_and_skips_unchanged_document(tmp_path: Path, monkeypatch
     assert results[0]["path"] == "sample APR 2026.pdf"
     assert results[0]["location"] == "page 1"
     assert results[0]["text"] == "searchable text"
+
+
+def test_ingest_skips_powerpoint_without_embeddable_content(tmp_path: Path, monkeypatch):
+    document_root = tmp_path / "documents"
+    document_root.mkdir()
+    (document_root / "Presentation.pptx").write_bytes(b"fake pptx")
+    db_path = tmp_path / "index.db"
+    monkeypatch.setattr(
+        rag,
+        "extract_sections",
+        lambda path, describe_images, vision_concurrency: [
+            {
+                "location": "slide 1",
+                "text": "",
+                "visual_description": None,
+                "visual_useful": False,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        rag,
+        "get_embeddings",
+        lambda texts: (_ for _ in ()).throw(AssertionError("embedding requested")),
+    )
+
+    result = rag.ingest(document_root, db_path, describe_images=False)
+
+    assert result["indexed"] == 0
+    assert result["skipped"] == 1
+    assert result["documents"][0]["reason"] == (
+        "no searchable text or useful visual description"
+    )
+    assert rag.stats(db_path)["embeddings"] == 0
 
 
 def test_visual_descriptions_are_added_to_section_text(tmp_path: Path, monkeypatch):

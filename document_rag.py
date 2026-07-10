@@ -8,9 +8,11 @@ import io
 import json
 import os
 import re
+import shutil
 import sqlite3
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -209,8 +211,16 @@ def powerpoint_substantive_visuals(path: Path) -> list[bool]:
 
 
 def windows_path(path: Path) -> str:
+    resolved_path = path.resolve()
+    if sys.platform == "win32":
+        return str(resolved_path)
+    if shutil.which("wslpath") is None:
+        raise RuntimeError(
+            "PowerPoint visual rendering requires Windows or WSL with Windows PowerPoint. "
+            "Use --no-vision to skip visual rendering."
+        )
     result = subprocess.run(
-        ["wslpath", "-w", str(path.resolve())],
+        ["wslpath", "-w", str(resolved_path)],
         capture_output=True,
         text=True,
         timeout=10,
@@ -610,6 +620,16 @@ def index_document(
 
     embedded_chunks = []
     chunks_to_embed = [chunk for chunk in chunks if chunk["embedding_text"]]
+    if not chunks_to_embed:
+        return {
+            "name": document_name,
+            "year": document_year,
+            "month": document_month,
+            "path": relative_path,
+            "status": "skipped",
+            "chunks": 0,
+            "reason": "no searchable text or useful visual description",
+        }
     for offset in range(0, len(chunks_to_embed), EMBED_BATCH_SIZE):
         batch = chunks_to_embed[offset : offset + EMBED_BATCH_SIZE]
         vectors = get_embeddings([chunk["embedding_text"] for chunk in batch])
