@@ -1,0 +1,18 @@
+[project]
+name = "document-rag"
+version = "0.1.0"
+description = "Local semantic search over PDF and PowerPoint documents using GitHub Models embeddings"
+requires-python = ">=3.10"
+dependencies = [
+    "pypdf>=5.0",
+    "pypdfium2>=4.30",
+    "python-pptx>=1.0",
+    "sqlite-vec>=0.1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
