@@ -26,6 +26,18 @@ def test_discover_documents_is_recursive_and_filters_extensions(tmp_path: Path):
     assert documents == [tmp_path / "guide.PDF", nested / "deck.pptx"]
 
 
+def test_discover_documents_can_limit_search_to_top_level(tmp_path: Path):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    top_level = tmp_path / "guide.pdf"
+    top_level.touch()
+    (nested / "deck.pptx").touch()
+
+    documents = rag.discover_documents(tmp_path, recursive=False)
+
+    assert documents == [top_level]
+
+
 def test_windows_path_does_not_call_wslpath_on_native_windows(tmp_path: Path, monkeypatch):
     source = tmp_path / "Presentation.pptx"
     expected = str(source.resolve())

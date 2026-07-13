@@ -617,10 +617,11 @@ def serialize_f32(vector: list[float]) -> bytes:
     return struct.pack(f"{len(vector)}f", *vector)
 
 
-def discover_documents(root: Path) -> list[Path]:
+def discover_documents(root: Path, recursive: bool = True) -> list[Path]:
+    candidates = root.rglob("*") if recursive else root.iterdir()
     return sorted(
         path
-        for path in root.rglob("*")
+        for path in candidates
         if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
     )
 
@@ -856,12 +857,13 @@ def ingest(
     prune: bool = False,
     describe_images: bool = True,
     vision_concurrency: int = VISION_CONCURRENCY,
+    recursive: bool = True,
 ) -> dict:
     root = root.resolve()
     if not root.is_dir():
         raise ValueError(f"Document directory not found: {root}")
     db = get_db(db_path)
-    documents = discover_documents(root)
+    documents = discover_documents(root, recursive)
     results = []
     for path in documents:
         try:
@@ -934,7 +936,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", type=Path, default=DB_PATH, help="SQLite index path")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    ingest_parser = subparsers.add_parser("ingest", help="Recursively index PDFs and PPTX files")
+    ingest_parser = subparsers.add_parser("ingest", help="Index PDFs and PPTX files")
     ingest_parser.add_argument("directory", type=Path)
     ingest_parser.add_argument(
         "--max-chars", type=int, default=2400, help="Maximum PDF page chunk size"
@@ -943,6 +945,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--overlap-chars", type=int, default=300, help="PDF page chunk overlap"
     )
     ingest_parser.add_argument("--prune", action="store_true", help="Remove records for missing files")
+    ingest_parser.add_argument(
+        "--no-recursive",
+        dest="recursive",
+        action="store_false",
+        help="Index only files directly in the specified directory",
+    )
     ingest_parser.add_argument(
         "--no-vision",
         action="store_true",
@@ -973,6 +981,7 @@ def main() -> None:
             args.prune,
             not args.no_vision,
             args.vision_concurrency,
+            args.recursive,
         )
     elif args.command == "search":
         result = search(args.query, args.limit, args.db)

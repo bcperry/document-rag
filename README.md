@@ -25,6 +25,12 @@ Point `ingest` at a directory. It recursively finds `.pdf` and `.pptx` files:
 uv run python document_rag.py ingest ./documents
 ```
 
+Use `--no-recursive` to index only files directly in that directory:
+
+```bash
+uv run python document_rag.py ingest ./documents --no-recursive
+```
+
 Re-running the command skips files whose SHA-256 hash has not changed. Use `--prune` to also remove indexed records for files no longer present:
 
 ```bash
