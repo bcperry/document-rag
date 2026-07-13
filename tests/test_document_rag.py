@@ -143,17 +143,24 @@ def test_ingest_skips_powerpoint_without_embeddable_content(tmp_path: Path, monk
     document_root.mkdir()
     (document_root / "Presentation.pptx").write_bytes(b"fake pptx")
     db_path = tmp_path / "index.db"
-    monkeypatch.setattr(
-        rag,
-        "extract_sections",
-        lambda path, describe_images, vision_concurrency: [
+    extract_calls = 0
+
+    def extract_empty_sections(path, describe_images, vision_concurrency):
+        nonlocal extract_calls
+        extract_calls += 1
+        return [
             {
                 "location": "slide 1",
                 "text": "",
                 "visual_description": None,
                 "visual_useful": False,
             }
-        ],
+        ]
+
+    monkeypatch.setattr(
+        rag,
+        "extract_sections",
+        extract_empty_sections,
     )
     monkeypatch.setattr(
         rag,
@@ -162,12 +169,55 @@ def test_ingest_skips_powerpoint_without_embeddable_content(tmp_path: Path, monk
     )
 
     result = rag.ingest(document_root, db_path, describe_images=False)
+    second = rag.ingest(document_root, db_path, describe_images=False)
 
     assert result["indexed"] == 0
     assert result["skipped"] == 1
     assert result["documents"][0]["reason"] == (
         "no searchable text or useful visual description"
     )
+    assert second["unchanged"] == 1
+    assert extract_calls == 1
+    assert rag.stats(db_path)["documents"] == 1
+    assert rag.stats(db_path)["embeddings"] == 0
+
+
+def test_changed_document_with_no_embeddable_content_removes_stale_chunks(
+    tmp_path: Path, monkeypatch
+):
+    document_root = tmp_path / "documents"
+    document_root.mkdir()
+    source = document_root / "sample.pdf"
+    source.write_bytes(b"searchable")
+    db_path = tmp_path / "index.db"
+    sections = [
+        {
+            "location": "page 1",
+            "text": "searchable text",
+            "visual_description": None,
+            "visual_useful": False,
+        }
+    ]
+    monkeypatch.setattr(
+        rag,
+        "extract_sections",
+        lambda path, describe_images, vision_concurrency: sections,
+    )
+    monkeypatch.setattr(
+        rag,
+        "get_embeddings",
+        lambda texts: [[float(index % 7) for index in range(rag.EMBED_DIM)] for _ in texts],
+    )
+
+    first = rag.ingest(document_root, db_path, describe_images=False)
+    source.write_bytes(b"empty")
+    sections.clear()
+    second = rag.ingest(document_root, db_path, describe_images=False)
+
+    assert first["indexed"] == 1
+    assert second["skipped"] == 1
+    assert rag.stats(db_path)["documents"] == 1
+    assert rag.stats(db_path)["chunks"] == 0
     assert rag.stats(db_path)["embeddings"] == 0
 
 

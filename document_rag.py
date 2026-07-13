@@ -578,6 +578,52 @@ def parse_document_date(name: str) -> tuple[int | None, int | None]:
     return (int(year.group(1)), None) if year else (None, None)
 
 
+def delete_document_chunks(db: sqlite3.Connection, document_id: str) -> None:
+    old_chunk_ids = db.execute(
+        "SELECT id FROM chunks WHERE document_id = ?", (document_id,)
+    ).fetchall()
+    for old_chunk in old_chunk_ids:
+        db.execute("DELETE FROM vec_chunks WHERE chunk_id = ?", (old_chunk["id"],))
+    db.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
+
+
+def upsert_document(
+    db: sqlite3.Connection,
+    document_id: str,
+    relative_path: str,
+    document_name: str,
+    document_year: int | None,
+    document_month: int | None,
+    file_type: str,
+    vision_model: str | None,
+    file_hash: str,
+) -> None:
+    db.execute(
+        """INSERT INTO documents
+               (id, path, name, year, month, file_type, vision_model, content_hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            path = excluded.path,
+            name = excluded.name,
+            year = excluded.year,
+            month = excluded.month,
+            file_type = excluded.file_type,
+            vision_model = excluded.vision_model,
+            content_hash = excluded.content_hash,
+            indexed_at = CURRENT_TIMESTAMP""",
+        (
+            document_id,
+            relative_path,
+            document_name,
+            document_year,
+            document_month,
+            file_type,
+            vision_model,
+            file_hash,
+        ),
+    )
+
+
 def index_document(
     db: sqlite3.Connection,
     path: Path,
@@ -619,6 +665,19 @@ def index_document(
         vision_concurrency,
     )
     if not chunks:
+        delete_document_chunks(db, document_id)
+        upsert_document(
+            db,
+            document_id,
+            relative_path,
+            document_name,
+            document_year,
+            document_month,
+            path.suffix.lower().lstrip("."),
+            vision_model,
+            file_hash,
+        )
+        db.commit()
         return {
             "name": document_name,
             "year": document_year,
@@ -632,6 +691,19 @@ def index_document(
     embedded_chunks = []
     chunks_to_embed = [chunk for chunk in chunks if chunk["embedding_text"]]
     if not chunks_to_embed:
+        delete_document_chunks(db, document_id)
+        upsert_document(
+            db,
+            document_id,
+            relative_path,
+            document_name,
+            document_year,
+            document_month,
+            path.suffix.lower().lstrip("."),
+            vision_model,
+            file_hash,
+        )
+        db.commit()
         return {
             "name": document_name,
             "year": document_year,
@@ -646,35 +718,17 @@ def index_document(
         vectors = get_embeddings([chunk["embedding_text"] for chunk in batch])
         embedded_chunks.extend(zip(batch, vectors))
 
-    old_chunk_ids = db.execute(
-        "SELECT id FROM chunks WHERE document_id = ?", (document_id,)
-    ).fetchall()
-    for old_chunk in old_chunk_ids:
-        db.execute("DELETE FROM vec_chunks WHERE chunk_id = ?", (old_chunk["id"],))
-    db.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
-    db.execute(
-                  """INSERT INTO documents
-                         (id, path, name, year, month, file_type, vision_model, content_hash)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET
-             path = excluded.path,
-                         name = excluded.name,
-                         year = excluded.year,
-                         month = excluded.month,
-             file_type = excluded.file_type,
-                         vision_model = excluded.vision_model,
-             content_hash = excluded.content_hash,
-             indexed_at = CURRENT_TIMESTAMP""",
-                (
-                        document_id,
-                        relative_path,
-                        document_name,
-                        document_year,
-                        document_month,
-                        path.suffix.lower().lstrip("."),
-                        vision_model,
-                        file_hash,
-                ),
+    delete_document_chunks(db, document_id)
+    upsert_document(
+        db,
+        document_id,
+        relative_path,
+        document_name,
+        document_year,
+        document_month,
+        path.suffix.lower().lstrip("."),
+        vision_model,
+        file_hash,
     )
 
     for chunk in chunks:
