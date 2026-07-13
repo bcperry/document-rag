@@ -1,6 +1,6 @@
 # Document RAG
 
-A focused local semantic-search index for collections of PDF and PowerPoint files. Documents are recursively discovered, extracted and rendered by page or slide, described by a small vision model, embedded with GitHub Models, and stored in SQLite with `sqlite-vec`. Each PowerPoint slide is one atomic chunk; long PDF pages use overlapping chunks.
+A focused local semantic-search index for collections of PDF and PowerPoint files. Documents are recursively discovered, extracted and rendered by page or slide, described by a small vision model, embedded locally or with GitHub Models, and stored in SQLite with `sqlite-vec`. Each PowerPoint slide is one atomic chunk; long PDF pages use overlapping chunks.
 
 ## Requirements
 
@@ -9,7 +9,7 @@ A focused local semantic-search index for collections of PDF and PowerPoint file
 - Authenticated GitHub CLI: `gh auth login`
 - Windows PowerPoint for `.pptx` visual rendering, either from native Windows or through WSL interoperability
 
-`gh auth token` authenticates requests to GitHub Models. Text uses `text-embedding-3-small`; slide and page images use the low-tier `openai/gpt-4.1-nano` vision model.
+`gh auth token` authenticates requests to GitHub Models. By default, text uses `text-embedding-3-small`; slide and page images use the low-tier `openai/gpt-4.1-nano` vision model. Set `RAG_EMBED_PROVIDER=local` to use the CPU-local `BAAI/bge-small-en-v1.5` embedding model instead.
 
 ## Setup
 
@@ -31,13 +31,21 @@ Re-running the command skips files whose SHA-256 hash has not changed. Use `--pr
 uv run python document_rag.py ingest ./documents --prune
 ```
 
-By default, every PowerPoint slide and PDF page is rendered to a temporary JPEG. Each vision request carries exactly one image, and up to five requests run concurrently. Basic title, intro, divider, agenda, and text-only slides are flagged as not visually useful using both model classification and deterministic PowerPoint structure checks. Their descriptions are stored for inspection but excluded from embeddings; extracted slide text remains searchable. Descriptions for visually useful screenshots, photographs, charts, diagrams, and status layouts are included in embeddings. Adjust concurrency with `--vision-concurrency`, or use `--no-vision` for a text-only run.
+By default, PowerPoint slides and PDF pages are rendered to temporary JPEGs. Deterministic checks skip vision requests for cover, agenda, divider, and PowerPoint slides without substantive visual structures. Each remaining vision request carries exactly one image, and up to five requests run concurrently. Completed descriptions are cached under `.rag/vision-cache`, so interrupted or rate-limited ingestion resumes without repeating finished image requests. Descriptions for useful screenshots, photographs, charts, diagrams, and status layouts are included in embeddings. Adjust concurrency with `--vision-concurrency`, or use `--no-vision` for a text-only run.
 
 PowerPoint rendering works when Python runs directly on Windows and when it runs in WSL with `powershell.exe` and `wslpath` available. Native Windows paths are passed directly to PowerPoint; WSL paths are translated before invoking PowerPoint COM.
 
 `--no-vision` can only index text that `python-pptx` extracts. An image-only deck or slide with no useful extracted text has no content to embed and is reported as skipped with `no searchable text or useful visual description`. Run normal vision-enabled ingestion for screenshots, photographs, and other visual-only content.
 
-GitHub Models free usage is rate limited. One-image requests are more reliable with the small vision model, while concurrency reduces time spent waiting on individual responses.
+GitHub Models free usage is rate limited. Requests fail clearly when a daily quota returns a long `Retry-After` value instead of sleeping for hours. For large corpora, use local embeddings so only vision requests consume GitHub Models quota:
+
+```powershell
+$env:RAG_EMBED_PROVIDER = "local"
+uv run python document_rag.py --db .rag/catalog-local.db ingest ./documents --prune
+uv run python document_rag.py --db .rag/catalog-local.db search "degree requirements"
+```
+
+Use a separate database for each embedding provider because the vector dimensions differ.
 
 Scanned PDFs need OCR before ingestion; `pypdf` only extracts an existing text layer. Legacy `.ppt` files must be converted to `.pptx`.
 

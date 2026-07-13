@@ -26,15 +26,26 @@ except ImportError:
 
 
 DB_PATH = Path(os.environ.get("RAG_DB_PATH", ".rag/index.db"))
-EMBED_MODEL = "text-embedding-3-small"
-EMBED_DIM = 1536
+EMBED_PROVIDER = os.environ.get("RAG_EMBED_PROVIDER", "github").lower()
+if EMBED_PROVIDER == "local":
+    EMBED_MODEL = os.environ.get("RAG_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+    EMBED_DIM = 384
+    EMBED_BATCH_SIZE = 256
+elif EMBED_PROVIDER == "github":
+    EMBED_MODEL = os.environ.get("RAG_EMBED_MODEL", "text-embedding-3-small")
+    EMBED_DIM = 1536
+    EMBED_BATCH_SIZE = 100
+else:
+    raise RuntimeError(f"Unsupported embedding provider: {EMBED_PROVIDER}")
 EMBED_URL = "https://models.inference.ai.azure.com/embeddings"
-EMBED_BATCH_SIZE = 20
 VISION_MODEL = os.environ.get("RAG_VISION_MODEL", "openai/gpt-4.1-nano")
 VISION_URL = "https://models.github.ai/inference/chat/completions"
 VISION_REQUEST_INTERVAL_SECONDS = 4.1
 VISION_CONCURRENCY = int(os.environ.get("RAG_VISION_CONCURRENCY", "5"))
+VISION_CACHE_DIR = Path(os.environ.get("RAG_VISION_CACHE_DIR", ".rag/vision-cache"))
+MAX_REMOTE_RETRY_SECONDS = 60
 SUPPORTED_EXTENSIONS = {".pdf", ".pptx"}
+_local_embedder = None
 MONTH_NUMBERS = {
     "jan": 1,
     "january": 1,
@@ -270,11 +281,14 @@ def render_pdf(path: Path, output_dir: Path) -> list[Path]:
 
     document = pdfium.PdfDocument(path)
     images = []
-    for page_index in range(len(document)):
-        image_path = output_dir / f"page-{page_index + 1}.jpg"
-        bitmap = document[page_index].render(scale=1.5)
-        bitmap.to_pil().convert("RGB").save(image_path, "JPEG", quality=80)
-        images.append(image_path)
+    try:
+        for page_index in range(len(document)):
+            image_path = output_dir / f"page-{page_index + 1}.jpg"
+            bitmap = document[page_index].render(scale=1.5)
+            bitmap.to_pil().convert("RGB").save(image_path, "JPEG", quality=80)
+            images.append(image_path)
+    finally:
+        document.close()
     return images
 
 
@@ -360,6 +374,11 @@ def describe_image(path: Path, extracted_text: str) -> dict:
             if error.code != 429 or attempt == 5:
                 raise
             retry_after = float(error.headers.get("Retry-After", max(10, 2**attempt)))
+            if retry_after > MAX_REMOTE_RETRY_SECONDS:
+                raise RuntimeError(
+                    f"GitHub Models vision quota exhausted; retry after "
+                    f"{int(retry_after)} seconds"
+                ) from error
             time.sleep(retry_after)
         except (KeyError, TypeError, ValueError):
             if attempt == 5:
@@ -367,9 +386,27 @@ def describe_image(path: Path, extracted_text: str) -> dict:
     raise RuntimeError("Vision request failed")
 
 
+def describe_image_cached(path: Path, extracted_text: str) -> dict:
+    cache_key = stable_id(
+        f"{VISION_MODEL}:{sha256_bytes(path)}:{normalize_text(extracted_text)}"
+    )
+    cache_path = VISION_CACHE_DIR / f"{cache_key}.json"
+    if cache_path.exists():
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+
+    result = describe_image(path, extracted_text)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = cache_path.with_suffix(f".{os.getpid()}.tmp")
+    temporary_path.write_text(json.dumps(result), encoding="utf-8")
+    os.replace(temporary_path, cache_path)
+    return result
+
+
 def is_basic_slide(location: str, extracted_text: str) -> bool:
-    slide_match = re.fullmatch(r"slide\s+(\d+)", location, flags=re.IGNORECASE)
-    if slide_match and int(slide_match.group(1)) == 1:
+    section_match = re.fullmatch(
+        r"(?:slide|page)\s+(\d+)", location, flags=re.IGNORECASE
+    )
+    if section_match and int(section_match.group(1)) == 1:
         return True
 
     normalized = normalize_text(extracted_text).lower()
@@ -392,9 +429,14 @@ def add_visual_descriptions(
     path: Path,
     sections: list[tuple[str, str]],
     concurrency: int = VISION_CONCURRENCY,
+    describe_mask: list[bool] | None = None,
 ) -> list[dict]:
     if concurrency < 1:
         raise ValueError("vision concurrency must be at least 1")
+    if describe_mask is None:
+        describe_mask = [not is_basic_slide(location, text) for location, text in sections]
+    if len(describe_mask) != len(sections):
+        raise ValueError("vision description mask must match section count")
     Path(".rag").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="render-", dir=".rag") as temporary_dir:
         images = render_sections(path, Path(temporary_dir).resolve())
@@ -402,13 +444,23 @@ def add_visual_descriptions(
             raise RuntimeError(
                 f"Rendered {len(images)} images for {len(sections)} sections in {path.name}"
             )
+        candidates = [
+            (index, image, sections[index][1])
+            for index, image in enumerate(images)
+            if describe_mask[index]
+        ]
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
-            visual_results = list(
+            described_candidates = list(
                 executor.map(
-                    lambda item: describe_image(item[0], item[1][1]),
-                    zip(images, sections),
+                    lambda item: describe_image_cached(item[1], item[2]),
+                    candidates,
                 )
             )
+        visual_results = [
+            {"description": None, "useful": False} for _ in sections
+        ]
+        for (index, _, _), visual_result in zip(candidates, described_candidates):
+            visual_results[index] = visual_result
         return [
             {
                 "location": location,
@@ -435,14 +487,14 @@ def extract_sections(
     else:
         raise ValueError(f"Unsupported file type: {path.suffix}")
     if describe_images:
-        described_sections = add_visual_descriptions(path, sections, vision_concurrency)
-        if substantive_visuals is not None:
-            for section, has_substantive_visual in zip(
-                described_sections, substantive_visuals
-            ):
-                section["visual_useful"] = (
-                    section["visual_useful"] and has_substantive_visual
-                )
+        describe_mask = [
+            not is_basic_slide(location, text)
+            and (substantive_visuals[index] if substantive_visuals is not None else True)
+            for index, (location, text) in enumerate(sections)
+        ]
+        described_sections = add_visual_descriptions(
+            path, sections, vision_concurrency, describe_mask
+        )
         return described_sections
     return [
         {
@@ -526,6 +578,17 @@ def get_github_token() -> str:
 
 
 def get_embeddings(texts: list[str]) -> list[list[float]]:
+    global _local_embedder
+    if EMBED_PROVIDER == "local":
+        if _local_embedder is None:
+            from fastembed import TextEmbedding
+
+            _local_embedder = TextEmbedding(model_name=EMBED_MODEL)
+        return [
+            embedding.tolist()
+            for embedding in _local_embedder.embed(texts, batch_size=EMBED_BATCH_SIZE)
+        ]
+
     payload = json.dumps({"input": texts, "model": EMBED_MODEL}).encode()
     headers = {
         "Authorization": f"Bearer {get_github_token()}",
@@ -541,6 +604,11 @@ def get_embeddings(texts: list[str]) -> list[list[float]]:
             if error.code != 429 or attempt == 4:
                 raise
             retry_after = float(error.headers.get("Retry-After", 2**attempt))
+            if retry_after > MAX_REMOTE_RETRY_SECONDS:
+                raise RuntimeError(
+                    f"GitHub Models embedding quota exhausted; retry after "
+                    f"{int(retry_after)} seconds"
+                ) from error
             time.sleep(retry_after)
     raise RuntimeError("Embedding request failed")
 
@@ -856,6 +924,7 @@ def stats(db_path: Path = DB_PATH) -> dict:
         "chunks": db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0],
         "embeddings": db.execute("SELECT COUNT(*) FROM vec_chunks").fetchone()[0],
         "database": str(db_path),
+        "embedding_provider": EMBED_PROVIDER,
         "model": EMBED_MODEL,
     }
 

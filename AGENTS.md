@@ -17,6 +17,8 @@ This repository provides a local semantic index for PDF and PowerPoint corpora. 
 - Do not modify generated databases or virtual-environment files directly.
 - Support PowerPoint rendering on both native Windows and WSL; native Windows must not depend on `wslpath`.
 - Treat a zero-embedding ingest as non-searchable. Report skipped reasons and use vision-enabled ingestion for image-only slides.
+- Use `RAG_EMBED_PROVIDER=local` with a dedicated database for large corpora that exceed GitHub Models embedding quotas.
+- Preserve the visual-description cache so interrupted ingestion can resume without repeating completed model calls.
 
 ## Common Commands
 

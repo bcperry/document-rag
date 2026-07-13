@@ -1,5 +1,7 @@
 from pathlib import Path
+import urllib.error
 
+import pytest
 import document_rag as rag
 
 
@@ -63,6 +65,7 @@ def test_parse_document_date_normalizes_filename_variants():
 
 def test_basic_slide_detection_forces_cover_and_agenda_only():
     assert rag.is_basic_slide("slide 1", "Quarterly Review") is True
+    assert rag.is_basic_slide("page 1", "Quarterly Review") is True
     assert rag.is_basic_slide("slide 4", "Agenda\nIntroductions\nNext steps") is True
     assert rag.is_basic_slide("slide 15", "Modernization project status table") is False
 
@@ -74,22 +77,25 @@ def test_text_only_powerpoint_visual_is_forced_basic(tmp_path: Path, monkeypatch
         lambda path: [("slide 2", "Text-only project update")],
     )
     monkeypatch.setattr(rag, "powerpoint_substantive_visuals", lambda path: [False])
-    monkeypatch.setattr(
-        rag,
-        "add_visual_descriptions",
-        lambda path, sections, concurrency: [
+    observed_mask = []
+
+    def add_descriptions(path, sections, concurrency, describe_mask):
+        observed_mask.extend(describe_mask)
+        return [
             {
                 "location": "slide 2",
                 "text": "Text-only project update",
-                "visual_description": "The slide contains several bullet points.",
-                "visual_useful": True,
+                "visual_description": None,
+                "visual_useful": False,
             }
-        ],
-    )
+        ]
+
+    monkeypatch.setattr(rag, "add_visual_descriptions", add_descriptions)
 
     sections = rag.extract_sections(tmp_path / "deck.pptx")
 
     assert sections[0]["visual_useful"] is False
+    assert observed_mask == [False]
 
 
 def test_ingest_indexes_and_skips_unchanged_document(tmp_path: Path, monkeypatch):
@@ -228,7 +234,7 @@ def test_visual_descriptions_are_added_to_section_text(tmp_path: Path, monkeypat
     monkeypatch.setattr(rag, "render_sections", lambda path, output_dir: images)
     monkeypatch.setattr(
         rag,
-        "describe_image",
+        "describe_image_cached",
         lambda path, text: {"description": f"Description {path.stem}", "useful": True},
     )
 
@@ -236,6 +242,7 @@ def test_visual_descriptions_are_added_to_section_text(tmp_path: Path, monkeypat
         tmp_path / "deck.pptx",
         [("slide 1", "First title"), ("slide 2", "Second title")],
         concurrency=1,
+        describe_mask=[True, True],
     )
 
     assert sections == [
@@ -257,18 +264,83 @@ def test_visual_descriptions_preserve_order_with_concurrency(tmp_path: Path, mon
     monkeypatch.setattr(rag, "render_sections", lambda path, output_dir: images)
     monkeypatch.setattr(
         rag,
-        "describe_image",
+        "describe_image_cached",
         lambda path, text: {"description": f"Description {path.stem}", "useful": True},
     )
 
     sections = [(f"slide {index}", f"Title {index}") for index in range(1, 7)]
     described = rag.add_visual_descriptions(
-        tmp_path / "deck.pptx", sections, concurrency=3
+        tmp_path / "deck.pptx",
+        sections,
+        concurrency=3,
+        describe_mask=[True] * len(sections),
     )
 
     assert [item["visual_description"].rsplit(" ", 1)[-1] for item in described] == [
         f"slide-{index}" for index in range(1, 7)
     ]
+
+
+def test_visual_description_cache_reuses_completed_request(tmp_path: Path, monkeypatch):
+    image = tmp_path / "slide.jpg"
+    image.write_bytes(b"image bytes")
+    cache_dir = tmp_path / "cache"
+    calls = 0
+
+    def describe(path, text):
+        nonlocal calls
+        calls += 1
+        return {"description": "Cached description", "useful": True}
+
+    monkeypatch.setattr(rag, "VISION_CACHE_DIR", cache_dir)
+    monkeypatch.setattr(rag, "describe_image", describe)
+
+    first = rag.describe_image_cached(image, "Status chart")
+    second = rag.describe_image_cached(image, "Status chart")
+
+    assert first == second
+    assert calls == 1
+    assert len(list(cache_dir.glob("*.json"))) == 1
+
+
+def test_local_embeddings_use_configured_embedder(monkeypatch):
+    class Vector:
+        def tolist(self):
+            return [0.1, 0.2, 0.3]
+
+    class Embedder:
+        def embed(self, texts, batch_size):
+            assert texts == ["one", "two"]
+            assert batch_size == rag.EMBED_BATCH_SIZE
+            return [Vector(), Vector()]
+
+    monkeypatch.setattr(rag, "EMBED_PROVIDER", "local")
+    monkeypatch.setattr(rag, "_local_embedder", Embedder())
+
+    assert rag.get_embeddings(["one", "two"]) == [
+        [0.1, 0.2, 0.3],
+        [0.1, 0.2, 0.3],
+    ]
+
+
+def test_github_embedding_daily_quota_fails_without_long_sleep(monkeypatch):
+    error = urllib.error.HTTPError(
+        rag.EMBED_URL,
+        429,
+        "rate limited",
+        {"Retry-After": "62925"},
+        None,
+    )
+    monkeypatch.setattr(rag, "EMBED_PROVIDER", "github")
+    monkeypatch.setattr(rag, "get_github_token", lambda: "token")
+    monkeypatch.setattr(
+        rag.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(RuntimeError, match="quota exhausted.*62925 seconds"):
+        rag.get_embeddings(["query"])
 
 
 def test_basic_visual_description_is_stored_but_not_embedded(tmp_path: Path, monkeypatch):
