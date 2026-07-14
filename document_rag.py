@@ -6,6 +6,7 @@ import concurrent.futures
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -27,9 +28,18 @@ except ImportError:
 
 DB_PATH = Path(os.environ.get("RAG_DB_PATH", ".rag/index.db"))
 EMBED_PROVIDER = os.environ.get("RAG_EMBED_PROVIDER", "github").lower()
-if EMBED_PROVIDER == "local":
-    EMBED_MODEL = os.environ.get("RAG_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
-    EMBED_DIM = 384
+LOCAL_TEXT_MODEL = "BAAI/bge-small-en-v1.5"
+LOCAL_TEXT_DIM = 384
+LOCAL_CLIP_TEXT_MODEL = "Qdrant/clip-ViT-B-32-text"
+LOCAL_CLIP_IMAGE_MODEL = "Qdrant/clip-ViT-B-32-vision"
+LOCAL_CLIP_DIM = 512
+if EMBED_PROVIDER == "local-multimodal":
+    EMBED_MODEL = f"{LOCAL_TEXT_MODEL}+Qdrant/clip-ViT-B-32"
+    EMBED_DIM = LOCAL_TEXT_DIM + LOCAL_CLIP_DIM
+    EMBED_BATCH_SIZE = 128
+elif EMBED_PROVIDER == "local":
+    EMBED_MODEL = os.environ.get("RAG_EMBED_MODEL", LOCAL_TEXT_MODEL)
+    EMBED_DIM = LOCAL_TEXT_DIM
     EMBED_BATCH_SIZE = 256
 elif EMBED_PROVIDER == "github":
     EMBED_MODEL = os.environ.get("RAG_EMBED_MODEL", "text-embedding-3-small")
@@ -46,6 +56,8 @@ VISION_CACHE_DIR = Path(os.environ.get("RAG_VISION_CACHE_DIR", ".rag/vision-cach
 MAX_REMOTE_RETRY_SECONDS = 60
 SUPPORTED_EXTENSIONS = {".pdf", ".pptx"}
 _local_embedder = None
+_local_clip_text_embedder = None
+_local_clip_image_embedder = None
 MONTH_NUMBERS = {
     "jan": 1,
     "january": 1,
@@ -473,6 +485,51 @@ def add_visual_descriptions(
         ]
 
 
+def add_local_visual_embeddings(
+    path: Path,
+    sections: list[tuple[str, str]],
+    describe_mask: list[bool],
+) -> list[dict]:
+    global _local_clip_image_embedder
+    if len(describe_mask) != len(sections):
+        raise ValueError("visual embedding mask must match section count")
+    Path(".rag").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="render-", dir=".rag") as temporary_dir:
+        images = render_sections(path, Path(temporary_dir).resolve())
+        if len(images) != len(sections):
+            raise RuntimeError(
+                f"Rendered {len(images)} images for {len(sections)} sections in {path.name}"
+            )
+        candidate_indexes = [
+            index for index, should_embed in enumerate(describe_mask) if should_embed
+        ]
+        if _local_clip_image_embedder is None:
+            from fastembed import ImageEmbedding
+
+            _local_clip_image_embedder = ImageEmbedding(
+                model_name=LOCAL_CLIP_IMAGE_MODEL
+            )
+        candidate_embeddings = list(
+            _local_clip_image_embedder.embed(
+                [images[index] for index in candidate_indexes],
+                batch_size=16,
+            )
+        )
+        visual_embeddings = [None] * len(sections)
+        for index, embedding in zip(candidate_indexes, candidate_embeddings):
+            visual_embeddings[index] = embedding.tolist()
+        return [
+            {
+                "location": location,
+                "text": text,
+                "visual_description": None,
+                "visual_useful": visual_embeddings[index] is not None,
+                "visual_embedding": visual_embeddings[index],
+            }
+            for index, (location, text) in enumerate(sections)
+        ]
+
+
 def extract_sections(
     path: Path,
     describe_images: bool = True,
@@ -492,6 +549,8 @@ def extract_sections(
             and (substantive_visuals[index] if substantive_visuals is not None else True)
             for index, (location, text) in enumerate(sections)
         ]
+        if EMBED_PROVIDER == "local-multimodal":
+            return add_local_visual_embeddings(path, sections, describe_mask)
         described_sections = add_visual_descriptions(
             path, sections, vision_concurrency, describe_mask
         )
@@ -502,6 +561,7 @@ def extract_sections(
             "text": text,
             "visual_description": None,
             "visual_useful": False,
+            "visual_embedding": None,
         }
         for location, text in sections
     ]
@@ -531,7 +591,13 @@ def make_chunks(
             visual_description = (
                 section["visual_description"] if section_index == 0 else None
             )
-            visual_useful = bool(section["visual_useful"] and visual_description)
+            visual_embedding = (
+                section.get("visual_embedding") if section_index == 0 else None
+            )
+            visual_useful = bool(
+                section["visual_useful"]
+                and (visual_description or visual_embedding is not None)
+            )
             embedding_parts = [section_chunk]
             if visual_useful:
                 embedding_parts.append(visual_description)
@@ -546,6 +612,7 @@ def make_chunks(
                     "text": section_chunk,
                     "visual_description": visual_description,
                     "visual_useful": visual_useful,
+                    "visual_embedding": visual_embedding,
                     "embedding_text": embedding_text,
                 }
             )
@@ -577,16 +644,44 @@ def get_github_token() -> str:
     raise RuntimeError("No GitHub token available. Run 'gh auth login'.")
 
 
+def normalize_embedding(vector: list[float]) -> list[float]:
+    magnitude = math.sqrt(sum(value * value for value in vector))
+    if magnitude == 0:
+        return vector
+    return [value / magnitude for value in vector]
+
+
 def get_embeddings(texts: list[str]) -> list[list[float]]:
-    global _local_embedder
-    if EMBED_PROVIDER == "local":
+    global _local_embedder, _local_clip_text_embedder
+    if EMBED_PROVIDER in {"local", "local-multimodal"}:
         if _local_embedder is None:
             from fastembed import TextEmbedding
 
-            _local_embedder = TextEmbedding(model_name=EMBED_MODEL)
-        return [
+            _local_embedder = TextEmbedding(model_name=LOCAL_TEXT_MODEL)
+        text_embeddings = [
             embedding.tolist()
             for embedding in _local_embedder.embed(texts, batch_size=EMBED_BATCH_SIZE)
+        ]
+        if EMBED_PROVIDER == "local":
+            return text_embeddings
+        if _local_clip_text_embedder is None:
+            from fastembed import TextEmbedding
+
+            _local_clip_text_embedder = TextEmbedding(
+                model_name=LOCAL_CLIP_TEXT_MODEL
+            )
+        clip_embeddings = [
+            embedding.tolist()
+            for embedding in _local_clip_text_embedder.embed(
+                texts, batch_size=EMBED_BATCH_SIZE
+            )
+        ]
+        return [
+            normalize_embedding(text_embedding)
+            + normalize_embedding(clip_embedding)
+            for text_embedding, clip_embedding in zip(
+                text_embeddings, clip_embeddings
+            )
         ]
 
     payload = json.dumps({"input": texts, "model": EMBED_MODEL}).encode()
@@ -611,6 +706,23 @@ def get_embeddings(texts: list[str]) -> list[list[float]]:
                 ) from error
             time.sleep(retry_after)
     raise RuntimeError("Embedding request failed")
+
+
+def merge_visual_embedding(
+    text_embedding: list[float], visual_embedding: list[float] | None
+) -> list[float]:
+    if EMBED_PROVIDER != "local-multimodal" or visual_embedding is None:
+        return text_embedding
+    text_part = text_embedding[:LOCAL_TEXT_DIM]
+    clip_text_part = text_embedding[LOCAL_TEXT_DIM:]
+    normalized_image = normalize_embedding(visual_embedding)
+    blended_clip = normalize_embedding(
+        [
+            text_value + image_value
+            for text_value, image_value in zip(clip_text_part, normalized_image)
+        ]
+    )
+    return text_part + blended_clip
 
 
 def serialize_f32(vector: list[float]) -> bytes:
@@ -705,7 +817,11 @@ def index_document(
     relative_path = path.relative_to(root).as_posix()
     document_name = path.stem
     document_year, document_month = parse_document_date(document_name)
-    vision_model = VISION_MODEL if describe_images else None
+    vision_model = (
+        LOCAL_CLIP_IMAGE_MODEL
+        if describe_images and EMBED_PROVIDER == "local-multimodal"
+        else VISION_MODEL if describe_images else None
+    )
     document_id = stable_id(relative_path)
     file_hash = sha256_bytes(path)
     existing = db.execute(
@@ -758,7 +874,11 @@ def index_document(
         }
 
     embedded_chunks = []
-    chunks_to_embed = [chunk for chunk in chunks if chunk["embedding_text"]]
+    chunks_to_embed = [
+        chunk
+        for chunk in chunks
+        if chunk["embedding_text"] or chunk.get("visual_embedding") is not None
+    ]
     if not chunks_to_embed:
         delete_document_chunks(db, document_id)
         upsert_document(
@@ -784,7 +904,13 @@ def index_document(
         }
     for offset in range(0, len(chunks_to_embed), EMBED_BATCH_SIZE):
         batch = chunks_to_embed[offset : offset + EMBED_BATCH_SIZE]
-        vectors = get_embeddings([chunk["embedding_text"] for chunk in batch])
+        vectors = get_embeddings(
+            [chunk["embedding_text"] or "visual content" for chunk in batch]
+        )
+        vectors = [
+            merge_visual_embedding(vector, chunk.get("visual_embedding"))
+            for chunk, vector in zip(batch, vectors)
+        ]
         embedded_chunks.extend(zip(batch, vectors))
 
     delete_document_chunks(db, document_id)

@@ -9,7 +9,7 @@ A focused local semantic-search index for collections of PDF and PowerPoint file
 - Authenticated GitHub CLI: `gh auth login`
 - Windows PowerPoint for `.pptx` visual rendering, either from native Windows or through WSL interoperability
 
-`gh auth token` authenticates requests to GitHub Models. By default, text uses `text-embedding-3-small`; slide and page images use the low-tier `openai/gpt-4.1-nano` vision model. Set `RAG_EMBED_PROVIDER=local` to use the CPU-local `BAAI/bge-small-en-v1.5` embedding model instead.
+`gh auth token` authenticates requests to GitHub Models. By default, text uses `text-embedding-3-small`; slide and page images use the low-tier `openai/gpt-4.1-nano` vision model. Set `RAG_EMBED_PROVIDER=local` to use CPU-local `BAAI/bge-small-en-v1.5` text embeddings. Set `RAG_EMBED_PROVIDER=local-multimodal` to remove all hosted model calls by combining local BGE text embeddings with matching CLIP text/image embeddings.
 
 ## Setup
 
@@ -52,6 +52,16 @@ uv run python document_rag.py --db .rag/catalog-local.db search "degree requirem
 ```
 
 Use a separate database for each embedding provider because the vector dimensions differ.
+
+For large visual corpora, use fully local multimodal embeddings. This renders visual candidates and embeds the images directly with CLIP instead of generating hosted-model descriptions:
+
+```powershell
+$env:RAG_EMBED_PROVIDER = "local-multimodal"
+uv run python document_rag.py --db .rag/catalog-multimodal.db ingest ./documents --prune
+uv run python document_rag.py --db .rag/catalog-multimodal.db search "architecture diagrams and red status indicators"
+```
+
+Multimodal results set `visual_useful` for chunks with image vectors. `visual_description` remains empty because no language model is called.
 
 Scanned PDFs need OCR before ingestion; `pypdf` only extracts an existing text layer. Legacy `.ppt` files must be converted to `.pptx`.
 

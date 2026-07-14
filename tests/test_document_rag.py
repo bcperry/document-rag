@@ -335,6 +335,49 @@ def test_local_embeddings_use_configured_embedder(monkeypatch):
     ]
 
 
+def test_multimodal_embedding_blends_image_into_clip_dimensions(monkeypatch):
+    monkeypatch.setattr(rag, "EMBED_PROVIDER", "local-multimodal")
+    text_embedding = [1.0] * rag.LOCAL_TEXT_DIM + [1.0] * rag.LOCAL_CLIP_DIM
+    visual_embedding = [0.0] * (rag.LOCAL_CLIP_DIM - 1) + [1.0]
+
+    merged = rag.merge_visual_embedding(text_embedding, visual_embedding)
+
+    assert len(merged) == rag.LOCAL_TEXT_DIM + rag.LOCAL_CLIP_DIM
+    assert merged[:rag.LOCAL_TEXT_DIM] == [1.0] * rag.LOCAL_TEXT_DIM
+    assert merged[rag.LOCAL_TEXT_DIM:] != text_embedding[rag.LOCAL_TEXT_DIM:]
+    assert sum(value * value for value in merged[rag.LOCAL_TEXT_DIM:]) == pytest.approx(
+        1.0
+    )
+
+
+def test_local_multimodal_sections_store_image_vectors(tmp_path: Path, monkeypatch):
+    image = tmp_path / "slide-1.jpg"
+    image.touch()
+
+    class Vector:
+        def tolist(self):
+            return [0.25] * rag.LOCAL_CLIP_DIM
+
+    class Embedder:
+        def embed(self, images, batch_size):
+            assert images == [image]
+            assert batch_size == 16
+            return [Vector()]
+
+    monkeypatch.setattr(rag, "render_sections", lambda path, output_dir: [image])
+    monkeypatch.setattr(rag, "_local_clip_image_embedder", Embedder())
+
+    sections = rag.add_local_visual_embeddings(
+        tmp_path / "deck.pptx",
+        [("slide 2", "Architecture diagram")],
+        [True],
+    )
+
+    assert sections[0]["visual_useful"] is True
+    assert sections[0]["visual_description"] is None
+    assert len(sections[0]["visual_embedding"]) == rag.LOCAL_CLIP_DIM
+
+
 def test_github_embedding_daily_quota_fails_without_long_sleep(monkeypatch):
     error = urllib.error.HTTPError(
         rag.EMBED_URL,
